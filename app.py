@@ -349,7 +349,6 @@ class EduFlow(Flow):
             if not content:
                 raise ValueError("No content received to save")
 
-            # Create temporary directory for file operations
             temp_dir = tempfile.mkdtemp()
             topic = self.input_variables.get("topic")
             file_name = f"{topic}_presentation.md".replace(" ", "_").lower()
@@ -370,9 +369,19 @@ class EduFlow(Flow):
 
     def kickoff(self) -> str:
         result = super().kickoff()
-        if isinstance(result, dict) and 'file_path' in result:
-            return result['file_path']
-        return result
+        # Check if result is a dictionary with expected structure
+        if isinstance(result, dict):
+            if 'file_path' in result:
+                return result['file_path']
+            # If content is directly in the dictionary
+            elif 'content' in result:
+                return self.save_to_markdown(result['content'])
+            # If result itself is the content
+            else:
+                return self.save_to_markdown(str(result))
+        # If result is a string (content)
+        else:
+            return self.save_to_markdown(str(result))
 
 def create_presentation(md_file_path):
     """Creates a PowerPoint presentation from the markdown file."""
