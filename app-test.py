@@ -378,7 +378,7 @@ class EduFlow(Flow):
         result = super().kickoff()
         if isinstance(result, dict) and 'file_path' in result:
             return result['file_path']
-        return str(result)
+        return result
 
 def create_presentation(md_file_path):
     """Creates a PowerPoint presentation from the markdown file."""
