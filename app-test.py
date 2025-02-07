@@ -70,7 +70,6 @@ st.markdown("""
 
 
 # Remove the old OAUTH_CREDENTIALS constant entirely
-
 def get_oauth_creds():
     """Get OAuth credentials from Streamlit secrets."""
     try:
@@ -102,19 +101,21 @@ def get_services():
             flow = InstalledAppFlow.from_client_config(
                 oauth_creds,
                 SCOPES,
-                redirect_uri="http://localhost:8501"  # Streamlit default port
+                redirect_uri="http://localhost:8502"
             )
             
-            # Use Streamlit to handle the OAuth flow
             auth_url, _ = flow.authorization_url(
                 access_type='offline',
-                include_granted_scopes='true'
+                include_granted_scopes='true',
+                prompt='consent'
             )
             
             st.markdown("### Google Authentication Required")
             st.write("Please authenticate with Google to create the presentation.")
             st.markdown(f"1. Click [here]({auth_url}) to authorize (opens in new tab)")
-            auth_code = st.text_input("2. Enter the authorization code:", type="password")
+            st.write("2. Choose your Google account and grant permission")
+            st.write("3. You will be redirected to localhost. Copy the authorization code from the URL")
+            auth_code = st.text_input("4. Paste the authorization code here:", type="password")
             
             if auth_code:
                 try:
