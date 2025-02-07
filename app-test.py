@@ -95,11 +95,30 @@ def get_services():
         if credentials and credentials.expired and credentials.refresh_token:
             credentials.refresh(Request())
         else:
+            # Create a flow instance with port_numbers parameter
             flow = InstalledAppFlow.from_client_config(OAUTH_CREDENTIALS, SCOPES)
-            credentials = flow.run_local_server(port=0)
+            # Use Streamlit to handle the OAuth flow
+            auth_url, _ = flow.authorization_url(prompt='consent')
             
-        st.session_state.google_token = credentials
-    
+            st.markdown("### Google Authentication Required")
+            st.write("Please authenticate with Google to create the presentation.")
+            st.markdown(f"1. Click [here]({auth_url}) to authorize (opens in new tab)")
+            auth_code = st.text_input("2. Enter the authorization code:", type="password")
+            
+            if auth_code:
+                try:
+                    flow.fetch_token(code=auth_code)
+                    credentials = flow.credentials
+                    st.session_state.google_token = credentials
+                    st.success("Successfully authenticated with Google!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Authentication failed: {str(e)}")
+                    return None, None
+            else:
+                st.info("Please complete the authentication steps above.")
+                return None, None
+            
     return build('slides', 'v1', credentials=credentials), build('drive', 'v3', credentials=credentials)
 
 def copy_presentation(drive_service, template_id, new_title):
@@ -389,6 +408,10 @@ def create_presentation(md_file_path):
         
         slides_service, drive_service = get_services()
         
+        # Check if services were created successfully
+        if not slides_service or not drive_service:
+            return None
+            
         presentation_id = copy_presentation(drive_service, TEMPLATE_ID, presentation_title)
         slide_data = parse_markdown(md_file_path)
         
@@ -475,16 +498,20 @@ if st.session_state.markdown_path and os.path.exists(st.session_state.markdown_p
     if create_ppt_button:
         with st.spinner("🎨 Creating PowerPoint presentation..."):
             try:
-                st.session_state.presentation_path = create_presentation(st.session_state.markdown_path)
-                st.success(f"✅ Presentation created successfully! Saved to: {st.session_state.presentation_path}")
-                
-                # Create download button
-                with open(st.session_state.presentation_path, "rb") as file:
-                    btn = st.download_button(
-                        label="📥 Download Presentation",
-                        data=file,
-                        file_name=os.path.basename(st.session_state.presentation_path),
-                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                    )
+                presentation_path = create_presentation(st.session_state.markdown_path)
+                if presentation_path:
+                    st.session_state.presentation_path = presentation_path
+                    st.success(f"✅ Presentation created successfully! Saved to: {st.session_state.presentation_path}")
+                    
+                    # Create download button
+                    with open(st.session_state.presentation_path, "rb") as file:
+                        btn = st.download_button(
+                            label="📥 Download Presentation",
+                            data=file,
+                            file_name=os.path.basename(st.session_state.presentation_path),
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        )
+                else:
+                    st.info("Please complete the Google authentication process to create the presentation.")
             except Exception as e:
                 st.error(f"❌ An error occurred while creating the presentation: {str(e)}")
