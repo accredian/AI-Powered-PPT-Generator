@@ -353,23 +353,24 @@ class EduFlow(Flow):
             logger.info("Starting save phase")
             if not content:
                 raise ValueError("No content received to save")
-
-            output_dir = os.path.join(os.path.dirname(st.runtime.get_instance().cwd), "output")
+    
+            # Create a temporary directory using Streamlit's temp directory
+            output_dir = os.path.join("/tmp", "output")
             os.makedirs(output_dir, exist_ok=True)
-
+    
             topic = self.input_variables.get("topic")
             file_name = f"{topic}_presentation.md".replace(" ", "_").lower()
             output_path = os.path.join(output_dir, file_name)
-
+    
             logger.info(f"Writing content to {output_path}")
             logger.debug(f"Content preview: {content[:100]}...")
-
+    
             with open(output_path, "w", encoding='utf-8') as f:
                 f.write(content)
-
+    
             logger.info(f"Content saved successfully to {output_path}")
             return output_path
-
+    
         except Exception as e:
             logger.error(f"Save phase failed: {str(e)}", exc_info=True)
             raise
