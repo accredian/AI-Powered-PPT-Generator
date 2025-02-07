@@ -24,18 +24,7 @@ import io
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Constants
-OAUTH_CREDENTIALS = {
-    "installed": {
-        "client_id": st.secrets["GOOGLE_CLIENT_ID"],
-        "project_id": st.secrets["GOOGLE_PROJECT_ID"],
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-        "client_secret": st.secrets["GOOGLE_CLIENT_SECRET"],
-        "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob"]
-    }
-}
+
 TEMPLATE_ID = "10muavbFdRofRMVp6D8RFLFIaQxdJIqoKaQzu7xKh_FU"
 
 # Set page config must be the first Streamlit command
@@ -79,6 +68,15 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+
+def get_oauth_creds():
+    """Get OAuth credentials from Streamlit secrets."""
+    try:
+        return st.secrets["google_credentials"]
+    except KeyError:
+        st.error("Google credentials not found in Streamlit secrets.")
+        return None
+
 # Google Slides Helper Functions
 def get_services():
     """Gets Google Slides and Drive services with automatic token handling."""
@@ -95,10 +93,22 @@ def get_services():
         if credentials and credentials.expired and credentials.refresh_token:
             credentials.refresh(Request())
         else:
-            # Create a flow instance with port_numbers parameter
-            flow = InstalledAppFlow.from_client_config(OAUTH_CREDENTIALS, SCOPES)
+            oauth_creds = get_oauth_creds()
+            if not oauth_creds:
+                st.error("Please configure Google credentials in Streamlit secrets.")
+                return None, None
+                
+            flow = InstalledAppFlow.from_client_config(
+                oauth_creds,
+                SCOPES,
+                redirect_uri="http://localhost:8501"  # Streamlit default port
+            )
+            
             # Use Streamlit to handle the OAuth flow
-            auth_url, _ = flow.authorization_url(prompt='consent')
+            auth_url, _ = flow.authorization_url(
+                access_type='offline',
+                include_granted_scopes='true'
+            )
             
             st.markdown("### Google Authentication Required")
             st.write("Please authenticate with Google to create the presentation.")
