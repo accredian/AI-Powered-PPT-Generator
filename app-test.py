@@ -101,7 +101,7 @@ def get_services():
             flow = InstalledAppFlow.from_client_config(
                 oauth_creds,
                 SCOPES,
-                redirect_uri="http://localhost:0"
+                redirect_uri="http://localhost:8502"
             )
             
             auth_url, _ = flow.authorization_url(
