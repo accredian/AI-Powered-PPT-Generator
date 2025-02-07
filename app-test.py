@@ -69,6 +69,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# Remove the old OAUTH_CREDENTIALS constant entirely
+
 def get_oauth_creds():
     """Get OAuth credentials from Streamlit secrets."""
     try:
@@ -77,7 +79,6 @@ def get_oauth_creds():
         st.error("Google credentials not found in Streamlit secrets.")
         return None
 
-# Google Slides Helper Functions
 def get_services():
     """Gets Google Slides and Drive services with automatic token handling."""
     SCOPES = [
