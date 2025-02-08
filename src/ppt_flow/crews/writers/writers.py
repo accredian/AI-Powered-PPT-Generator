@@ -1,10 +1,14 @@
 import requests
 import re
-from src.ppt_flow.llm_config import llm
+from src.ppt_flow.llm_config import get_llm
 from crewai_tools import SerperDevTool
 from crewai import Agent, Crew, Process, Task
 from crewai.project import CrewBase, agent, crew, task
 from tenacity import retry, wait_exponential, stop_after_attempt
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def check_link(url):
     """Returns True if the link is valid, False if it's broken (404)."""
@@ -18,6 +22,7 @@ def extract_links(text):
     """Extracts all links from markdown content."""
     return re.findall(r'\[.*?\]\((https?://.*?)\)', text)
 
+@retry(wait=wait_exponential(multiplier=1, max=60), stop=stop_after_attempt(3))
 def find_better_example(query):
     """Search for a new relevant example or case study with a valid link."""
     search_tool = SerperDevTool()
@@ -62,11 +67,15 @@ class Writers():
     agents_config = 'config/agents.yaml'
     tasks_config = 'config/tasks.yaml'
 
+    def __init__(self, model_name=None):
+        super().__init__()
+        self.llm = get_llm(model_name) 
+
     @agent
     def slide_content_writer(self) -> Agent:
         return Agent(
             config=self.agents_config['slide_content_writer'],
-            llm=llm,
+            llm=self.llm,
             verbose=True,
             memory=True
         )
@@ -76,19 +85,22 @@ class Writers():
         return Agent(
             config=self.agents_config['final_reviewer'],
             tools=[SerperDevTool()],  # Add Serper tool
-            llm=llm,
+            llm=self.llm,
             verbose=True,
             memory=True
         )
 
     @task
+    @retry(wait=wait_exponential(multiplier=1, max=60), stop=stop_after_attempt(3))
     def content_writing_task(self) -> Task:
         return Task(
             config=self.tasks_config['content_writing_task'],
             output_file='write-1.md'
         )
 
+
     @task
+    @retry(wait=wait_exponential(multiplier=1, max=60), stop=stop_after_attempt(3))
     def review_task(self) -> Task:
         """Reviews content, finds and replaces broken links with new relevant examples."""
         return Task(
@@ -106,6 +118,8 @@ class Writers():
         
         return updated_content  # Ensure modified content is returned
 
+
+   
     @crew
     def crew(self) -> Crew:
         """Creates the Writers crew"""

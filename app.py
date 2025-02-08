@@ -2,7 +2,6 @@ __import__('pysqlite3')
 import sys
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
-
 import os
 import sys
 import streamlit as st
@@ -10,24 +9,28 @@ from langtrace_python_sdk import langtrace
 from src.ppt_flow.crews.researchers.researchers import Researchers
 from src.ppt_flow.crews.writers.writers import Writers
 from crewai.flow.flow import Flow, start, listen
+from src.ppt_flow.llm_config import get_llm
 import logging
 from typing import Optional, Dict
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 import json
 import re
 import io
-import tempfile
+from tenacity import retry, stop_after_attempt, wait_exponential
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Constants
+SCOPES = [
+    "https://www.googleapis.com/auth/presentations",
+    "https://www.googleapis.com/auth/drive"
+]
 TEMPLATE_ID = "10muavbFdRofRMVp6D8RFLFIaQxdJIqoKaQzu7xKh_FU"
 
 # Set page config must be the first Streamlit command
@@ -71,30 +74,27 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Google Slides Helper Functions
 def get_services():
-    """Gets Google Slides and Drive services with automatic token handling."""
-    SCOPES = [
-        "https://www.googleapis.com/auth/presentations",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    
-    creds = None
-    if 'google_token' in st.session_state:
-        creds = Credentials.from_authorized_user_info(
-            json.loads(st.session_state.google_token), SCOPES)
-    
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                json.loads(st.secrets["google_credentials"]), SCOPES)
-            creds = flow.run_local_server(port=0)
+    """Gets Google Slides and Drive services using service account credentials from Streamlit secrets."""
+    try:
+        # Get service account info from Streamlit secrets
+        service_account_info = st.secrets["google_service_account"]
         
-        st.session_state.google_token = creds.to_json()
-    
-    return build('slides', 'v1', credentials=creds), build('drive', 'v3', credentials=creds)
+        # Create credentials
+        credentials = service_account.Credentials.from_service_account_info(
+            service_account_info,
+            scopes=SCOPES
+        )
+        
+        # Build services
+        slides_service = build('slides', 'v1', credentials=credentials)
+        drive_service = build('drive', 'v3', credentials=credentials)
+        
+        return slides_service, drive_service
+    except Exception as e:
+        logger.error(f"Error getting Google services: {e}")
+        st.error("Failed to authenticate with Google services. Please check if the service account credentials are properly configured in Streamlit secrets.")
+        raise
 
 def copy_presentation(drive_service, template_id, new_title):
     """Creates a copy of the template presentation and returns its ID."""
@@ -300,6 +300,7 @@ class EduFlow(Flow):
         super().__init__()
         self.input_variables = input_variables or {}
         self._validate_input()
+        self.llm = get_llm(self.input_variables.get("model"))
         logger.info(f"Initialized EduFlow with variables: {self.input_variables}")
 
     def _validate_input(self):
@@ -310,7 +311,8 @@ class EduFlow(Flow):
     def generate_reseached_content(self):
         try:
             logger.info("Starting research phase")
-            research_output = Researchers().crew().kickoff(self.input_variables)
+            researchers = Researchers(model_name=self.input_variables.get('model'))
+            research_output = researchers.crew().kickoff(self.input_variables)
             if not research_output or not research_output.raw:
                 raise ValueError("Research crew produced no output")
             logger.info(f"Research phase completed. Output preview: {research_output.raw[:100]}...")
@@ -331,7 +333,9 @@ class EduFlow(Flow):
                 "research_content": research_content
             }
             
-            writer_output = Writers().crew().kickoff(combined_input)
+            writers = Writers(model_name=self.input_variables.get('model'))
+            writer_output = writers.crew().kickoff(combined_input)
+            
             if not writer_output or not writer_output.raw:
                 raise ValueError("Writer crew produced no output")
             
@@ -349,11 +353,12 @@ class EduFlow(Flow):
             if not content:
                 raise ValueError("No content received to save")
 
-            # Create temporary directory for file operations
-            temp_dir = tempfile.mkdtemp()
+            output_dir = os.path.abspath("output")
+            os.makedirs(output_dir, exist_ok=True)
+
             topic = self.input_variables.get("topic")
             file_name = f"{topic}_presentation.md".replace(" ", "_").lower()
-            output_path = os.path.join(temp_dir, file_name)
+            output_path = os.path.join(output_dir, file_name)
 
             logger.info(f"Writing content to {output_path}")
             logger.debug(f"Content preview: {content[:100]}...")
@@ -370,39 +375,124 @@ class EduFlow(Flow):
 
     def kickoff(self) -> str:
         result = super().kickoff()
-        print(f"Kickoff result: {result}")  # Debugging output
         if isinstance(result, dict) and 'file_path' in result:
             return result['file_path']
-        if isinstance(result, dict):
-            return self.save_to_markdown(result)  # Ensure this returns a string
-        return str(result)  # Ensure a string is returned
+        return result
+
+
+# def create_presentation(md_file_path):
+#     """Creates a PowerPoint presentation from the markdown file."""
+#     try:
+#         presentation_title = os.path.splitext(os.path.basename(md_file_path))[0].replace('_', ' ')
+#         output_path = os.path.join(os.path.dirname(md_file_path), f"{presentation_title}.pptx")
+        
+#         slides_service, drive_service = get_services()
+        
+#         presentation_id = copy_presentation(drive_service, TEMPLATE_ID, presentation_title)
+#         slide_data = parse_markdown(md_file_path)
+        
+#         for _, title, content, links in slide_data:
+#             create_slide(slides_service, presentation_id, title, content, links)
+        
+#         export_presentation(drive_service, presentation_id, output_path)
+#         return output_path
+#     except Exception as e:
+#         logger.error(f"Error creating presentation: {str(e)}")
+#         raise
+
+def handle_rate_limit(func):
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10)
+    )
+    def wrapper(*args, **kwargs):
+        try:
+            result = func(*args, **kwargs)
+            time.sleep(1)  # Add a 1-second delay between API calls
+            return result
+        except HttpError as e:
+            if e.resp.status == 429:  # Rate limit exceeded
+                time.sleep(2)  # Wait longer if we hit the rate limit
+                raise  # Let retry handle it
+            raise
+    return wrapper
 
 
 def create_presentation(md_file_path):
     """Creates a PowerPoint presentation from the markdown file."""
     try:
-        temp_dir = tempfile.mkdtemp()
         presentation_title = os.path.splitext(os.path.basename(md_file_path))[0].replace('_', ' ')
-        output_path = os.path.join(temp_dir, f"{presentation_title}.pptx")
+        output_path = os.path.join(os.path.dirname(md_file_path), f"{presentation_title}.pptx")
         
         slides_service, drive_service = get_services()
         
         presentation_id = copy_presentation(drive_service, TEMPLATE_ID, presentation_title)
         slide_data = parse_markdown(md_file_path)
         
-        for _, title, content, links in slide_data:
-            create_slide(slides_service, presentation_id, title, content, links)
+        # Add progress bar
+        progress_bar = st.progress(0)
+        total_slides = len(slide_data)
         
+        for idx, (_, title, content, links) in enumerate(slide_data):
+            try:
+                # Add rate limiting to the batch update
+                @handle_rate_limit
+                def execute_batch_update(requests):
+                    return slides_service.presentations().batchUpdate(
+                        presentationId=presentation_id, 
+                        body={'requests': requests}
+                    ).execute()
+                
+                # Create slide with rate-limited batch updates
+                create_slide(slides_service, presentation_id, title, content, links)
+                progress = (idx + 1) / total_slides
+                progress_bar.progress(progress)
+                time.sleep(1)  # Add delay between slides
+                
+            except Exception as e:
+                st.warning(f"⚠️ Retrying slide {idx + 1} due to: {str(e)}")
+                time.sleep(2)  # Wait before retry
+                try:
+                    create_slide(slides_service, presentation_id, title, content, links)
+                except Exception as retry_error:
+                    st.error(f"❌ Failed to create slide {idx + 1}: {str(retry_error)}")
+                    continue
+        
+        progress_bar.progress(1.0)
         export_presentation(drive_service, presentation_id, output_path)
         return output_path
     except Exception as e:
         logger.error(f"Error creating presentation: {str(e)}")
         raise
 
+
 # Sidebar configuration
 with st.sidebar:
+    st.header("ℹ️ About")
+    st.markdown("""
+    PPT Generator is an AI-powered tool that helps you create professional presentations with ease. 
+    Simply enter your topic, and our AI agents will:
+    - Research your topic thoroughly
+    - Generate well-structured content
+    - Create a polished presentation
+    
+    Check this out to know more on API Keys-
+    - [Open AI API Key](https://platform.openai.com/docs/quickstart)
+    - [Serper API Key](https://docs.mindmac.app/how-to.../internet-browsing/get-serper-key)
+    """)
+    st.markdown("---")
+    
+    
     st.header("⚙️ Configuration")
     st.markdown("---")
+
+    # Add model selection
+    model_choice = st.selectbox(
+        "🤖 Select GPT Model",
+        options=["gpt-4o-mini", "gpt-4", "gpt-3.5-turbo"],
+        index=0,  # Default to first option
+        key="model_choice"
+    )
 
     openai_api_key = st.text_input("🔑 OpenAI API Key", type="password", key="openai_key")
     if openai_api_key:
@@ -423,11 +513,83 @@ with st.sidebar:
 st.title("📄 PPT Generator")
 st.markdown("### Transform Your Ideas into Professional Presentations")
 
-# Initialize session state
+# # Initialize session state
+# if 'markdown_path' not in st.session_state:
+#     st.session_state.markdown_path = None
+# if 'presentation_path' not in st.session_state:
+#     st.session_state.presentation_path = None
+
+# col1, col2 = st.columns([3, 1])
+
+# with col1:
+#     topic = st.text_input(
+#         "What would you like to create a presentation about?",
+#         placeholder="Enter your topic here...",
+#     )
+
+# with col2:
+#     st.write("")  # Spacing
+#     generate_button = st.button("🚀 Generate Content", use_container_width=True)
+
+# # Handle content generation
+# if generate_button:
+#     if not topic.strip():
+#         st.error("🎯 Please enter a topic to generate content.")
+#     elif not openai_api_key or not serper_api_key:
+#         st.error("🔑 Please enter both OpenAI and Serper API Keys in the sidebar.")
+#     else:
+#         with st.spinner("🎨 Generating presentation content..."):
+#             try:
+#                 input_variables = {"topic": topic}
+#                 edu_flow = EduFlow(input_variables)
+#                 st.session_state.markdown_path = edu_flow.kickoff()
+
+#                 if st.session_state.markdown_path and os.path.exists(st.session_state.markdown_path):
+#                     with open(st.session_state.markdown_path, "r", encoding="utf-8") as file:
+#                         markdown_content = file.read()
+                    
+#                     with st.expander("📑 Generated Content", expanded=True):
+#                         st.markdown(markdown_content, unsafe_allow_html=True)
+
+#                         # Add markdown download button
+#                         st.download_button(
+#                             label="📥 Download Markdown",
+#                             data=markdown_content,
+#                             file_name=f"{topic}_presentation.md",
+#                             mime="text/markdown")
+                
+#                 else:
+#                     st.error("❌ Failed to generate markdown content. Please try again.")
+#             except Exception as e:
+#                 st.error(f"❌ An error occurred: {str(e)}")
+
+# # Show create presentation button only if markdown content exists
+# if st.session_state.markdown_path and os.path.exists(st.session_state.markdown_path):
+#     create_ppt_button = st.button("🎯 Create PowerPoint Presentation", use_container_width=True)
+    
+#     if create_ppt_button:
+#         with st.spinner("🎨 Creating PowerPoint presentation..."):
+#             try:
+#                 st.session_state.presentation_path = create_presentation(st.session_state.markdown_path)
+#                 st.success(f"✅ Presentation created successfully! Saved to: {st.session_state.presentation_path}")
+                
+#                 # Create download button
+#                 with open(st.session_state.presentation_path, "rb") as file:
+#                     btn = st.download_button(
+#                         label="📥 Download Presentation",
+#                         data=file,
+#                         file_name=os.path.basename(st.session_state.presentation_path),
+#                         mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+#                     )
+#             except Exception as e:
+#                 st.error(f"❌ An error occurred while creating the presentation: {str(e)}")
+
 if 'markdown_path' not in st.session_state:
     st.session_state.markdown_path = None
 if 'presentation_path' not in st.session_state:
     st.session_state.presentation_path = None
+if 'markdown_content' not in st.session_state:
+    st.session_state.markdown_content = None
 
 col1, col2 = st.columns([3, 1])
 
@@ -441,7 +603,6 @@ with col2:
     st.write("")  # Spacing
     generate_button = st.button("🚀 Generate Content", use_container_width=True)
 
-
 # Handle content generation
 if generate_button:
     if not topic.strip():
@@ -451,40 +612,55 @@ if generate_button:
     else:
         with st.spinner("🎨 Generating presentation content..."):
             try:
-                input_variables = {"topic": topic}
+                input_variables = {"topic": topic, "model": st.session_state.model_choice}
                 edu_flow = EduFlow(input_variables)
                 st.session_state.markdown_path = edu_flow.kickoff()
 
                 if st.session_state.markdown_path and os.path.exists(st.session_state.markdown_path):
                     with open(st.session_state.markdown_path, "r", encoding="utf-8") as file:
-                        markdown_content = file.read()
+                        st.session_state.markdown_content = file.read()
                     
                     with st.expander("📑 Generated Content", expanded=True):
-                        st.markdown(markdown_content, unsafe_allow_html=True)
+                        st.markdown(st.session_state.markdown_content, unsafe_allow_html=True)
                 else:
                     st.error("❌ Failed to generate markdown content. Please try again.")
             except Exception as e:
                 st.error(f"❌ An error occurred: {str(e)}")
 
-# Show create presentation button only if markdown content exists
-if st.session_state.markdown_path and os.path.exists(st.session_state.markdown_path):
-    create_ppt_button = st.button("🎯 Create PowerPoint Presentation", use_container_width=True)
+# Create a container for the download buttons
+if st.session_state.markdown_content:
+    download_col1, download_col2 = st.columns(2)
     
-    if create_ppt_button:
-        with st.spinner("🎨 Creating PowerPoint presentation..."):
-            try:
-                st.session_state.presentation_path = create_presentation(st.session_state.markdown_path)
-                st.success(f"✅ Presentation created successfully!")
-                
-                # Create download button
-                with open(st.session_state.presentation_path, "rb") as file:
-                    btn = st.download_button(
-                        label="📥 Download Presentation",
-                        data=file,
-                        file_name=os.path.basename(st.session_state.presentation_path),
-                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                    )
-            except Exception as e:
-                st.error(f"❌ An error occurred while creating the presentation: {str(e)}")
+    with download_col1:
+        # Markdown download button
+        st.empty()
+        st.download_button(
+            label="📥 Download Markdown",
+            data=st.session_state.markdown_content,
+            file_name=f"{topic}_presentation.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+    
+    with download_col2:
+        # Create PowerPoint button
+        create_ppt_button = st.button("🎯 Create PowerPoint Presentation", use_container_width=True)
+        
+        if create_ppt_button:
+            with st.spinner("🎨 Creating PowerPoint presentation..."):
+                try:
+                    st.session_state.presentation_path = create_presentation(st.session_state.markdown_path)
+                    st.success(f"✅ Presentation created successfully! Saved to: {st.session_state.presentation_path}")
+                except Exception as e:
+                    st.error(f"❌ An error occurred while creating the presentation: {str(e)}")
 
-
+# PowerPoint download button (shows up after presentation is created)
+if st.session_state.presentation_path and os.path.exists(st.session_state.presentation_path):
+    with open(st.session_state.presentation_path, "rb") as file:
+        st.download_button(
+            label="📥 Download Presentation",
+            data=file,
+            file_name=os.path.basename(st.session_state.presentation_path),
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            use_container_width=True
+        )
