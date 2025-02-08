@@ -1,1 +1,1 @@
-# PPT-Gen-Final-App
+# AI Powered PPT Generator
